@@ -1,16 +1,16 @@
 [package]
 name = "genrex"
 version = "0.1.0"
-edition = "2021"
-authors = ["erocs <you@example.com>"]
-description = "Generate random strings matching a provided regular expression (MVP: rejection sampling)"
+edition = "2024"
+authors = ["erocs <github@erocs.org>"]
+description = "Generate random strings matching a provided regular expression. AI Project"
 license = "MIT"
 repository = "https://github.com/erocs/genrex"
 
 [dependencies]
 rand = "0.8"
 regex = "1"
-thiserror = "1.0"
+thiserror = "2"
 
 [dev-dependencies]
 pretty_assertions = "1.3"
