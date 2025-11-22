@@ -294,6 +294,8 @@ pub struct RegexGenerator {
     ast: Option<AstNode>,
     /// Lexer tokens (prefer token-based generation when available).
     tokens: Option<Vec<Token>>,
+    /// Number of capturing groups discovered by the lexer.
+    group_count: usize,
 }
 
 /// Builder for RegexGenerator.
@@ -376,6 +378,7 @@ impl RegexGeneratorBuilder {
             multiline: self.multiline,
             ast,
             tokens: tokens_field,
+            group_count: next_group.saturating_sub(1),
         })
     }
 }
@@ -404,16 +407,55 @@ impl RegexGenerator {
                 }
                 attempts += 1;
                 let mut ctx = crate::traits::TokenContext::new();
+                // Pre-size captures so backreferences referring to future groups are recorded
+                // as unresolved placeholders instead of causing immediate errors.
+                ctx.captures.resize(self.group_count, None);
                 let rng = &mut self.rng;
                 let mut out = String::new();
                 let mut ok = true;
                 for t in tokens {
+                    // inform context of current output length so tokens (especially Backreference)
+                    // can record unresolved placeholders relative to the current byte position.
+                    ctx.set_output_len(out.len());
                     match t.generate(&mut *rng, &mut ctx) {
                         Ok(s) => out.push_str(&s),
                         Err(_) => { ok = false; break; }
                     }
                 }
                 if !ok { continue; }
+                // If any unresolved backreferences were recorded, attempt to resolve them now.
+                if !ctx.unresolved_refs.is_empty() {
+                    let mut unresolved_missing = false;
+                    // Sort by position to insert in-order (they should already be in order but ensure correctness).
+                    ctx.unresolved_refs.sort_by_key(|(pos, _)| *pos);
+                    let mut final_out = out.clone();
+                    let mut offset = 0usize;
+                    for (pos, gid) in &ctx.unresolved_refs {
+                        if let Some(cap) = ctx.get_capture(*gid) {
+                            let insert_pos = (*pos).saturating_add(offset);
+                            if insert_pos <= final_out.len() {
+                                final_out.insert_str(insert_pos, &cap);
+                                offset += cap.len();
+                            } else {
+                                // Unexpected: recorded position out of bounds -> treat as unresolved.
+                                unresolved_missing = true;
+                                break;
+                            }
+                        } else {
+                            unresolved_missing = true;
+                            break;
+                        }
+                    }
+                    if unresolved_missing {
+                        // Unable to resolve forward refs for this candidate; try again.
+                        if VERBOSE.load(Ordering::Relaxed) {
+                            eprintln!("candidate rejected (unresolved backreference) during resolution: {}", out);
+                        }
+                        continue;
+                    } else {
+                        out = final_out;
+                    }
+                }
                 let len = out.len();
                 if len < self.config.min_len || len > self.config.max_len {
                     if VERBOSE.load(Ordering::Relaxed) {
@@ -563,6 +605,7 @@ impl Default for RegexGenerator {
             multiline: false,
             ast: None,
             tokens: None,
+            group_count: 0,
         }
     }
 }

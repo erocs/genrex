@@ -46,6 +46,7 @@ impl RegexToken for Token {
 			Token::Concatenation(tokens) => {
 				let mut out = String::new();
 				for t in tokens {
+					ctx.set_output_len(out.len());
 					out.push_str(&t.generate(rng, ctx)?);
 				}
 				Ok(out)
@@ -55,6 +56,7 @@ impl RegexToken for Token {
 					Err(GenrexError::Internal("Empty alternation".to_string()))
 				} else {
 					let idx = rng.gen_range(0..choices.len());
+					ctx.set_output_len(0); // caller will set top-level, but ensure child sees a sane baseline
 					choices[idx].generate(rng, ctx)
 				}
 			}
@@ -73,36 +75,40 @@ impl RegexToken for Token {
 				};
 				let mut out = String::new();
 				for _ in 0..count {
+					ctx.set_output_len(out.len());
 					out.push_str(&token.generate(rng, ctx)?);
 				}
 				Ok(out)
 			}
 			Token::Group(inner, idx) => {
+				// Ensure nested generation sees the current output length.
+				ctx.set_output_len(0); // caller for top-level tokens sets position; nested groups start from caller's last set position.
 				let s = inner.generate(rng, ctx)?;
-				// Record capture into context at the specified index (naive: overwrite slot).
-				if *idx == 0 {
-					// If index is 0 (temporary), append to captures vector.
-					ctx.captures.push(s.clone());
-				} else {
-					let slot = idx.saturating_sub(1);
-					if ctx.captures.len() <= slot {
-						ctx.captures.resize(slot + 1, String::new());
-					}
-					ctx.captures[slot] = s.clone();
-				}
+				// Record capture into context at the specified index.
+				ctx.record_capture(*idx, s.clone());
 				Ok(s)
 			}
-			Token::NonCapturingGroup(inner) => inner.generate(rng, ctx),
+			Token::NonCapturingGroup(inner) => {
+				ctx.set_output_len(0);
+				inner.generate(rng, ctx)
+			}
 			Token::Backreference(idx) => {
-				// Naive backreference support: lookup previously recorded capture by group index (1-based).
+				// Backreference support: lookup previously recorded capture by group index (1-based).
 				if *idx == 0 {
 					return Err(GenrexError::BackreferenceError("backreference index 0 is invalid".to_string()));
 				}
-				let capture_index = idx.saturating_sub(1);
-				if capture_index < ctx.captures.len() && !ctx.captures[capture_index].is_empty() {
-					Ok(ctx.captures[capture_index].clone())
+				// If the context has no capture slots at all, there are no groups in this generation context:
+				// treat this as an unsupported standalone backreference (error expected by tests).
+				if ctx.captures.is_empty() {
+					return Err(GenrexError::BackreferenceError(format!("no capture available for backreference \\{}", idx)));
+				}
+				if let Some(s) = ctx.get_capture(*idx) {
+					Ok(s)
 				} else {
-					Err(GenrexError::BackreferenceError(format!("no capture available for backreference \\{}", idx)))
+					// Record unresolved forward backreference for later resolution.
+					ctx.add_unresolved(*idx);
+					// Return empty for now; resolver may insert the actual text at the recorded position.
+					Ok(String::new())
 				}
 			}
 			Token::AnchorStart | Token::AnchorEnd | Token::WordBoundary => Ok(String::new()),

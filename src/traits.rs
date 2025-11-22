@@ -11,12 +11,20 @@ pub trait RegexToken {
     fn describe(&self) -> String;
 }
 
-/// Context for token generation (captures, backreferences, etc).
+/// Context for token generation (captures, backreferences, unresolved refs, etc).
+/// This context supports a two-pass generation strategy: the first pass records captures
+/// and unresolved backreferences; the second pass can attempt to resolve them.
 pub struct TokenContext {
     /// Maximum additional repeats to use when a quantifier has an open-ended max (usize::MAX).
     pub max_repeat: usize,
-    /// Captured group strings in appearance order; index = group number - 1 for backreferences.
-    pub captures: Vec<String>,
+    /// Captured group strings by group index (1-based -> slot index = id - 1).
+    /// Use Option<String> so we can record placeholders for groups not yet generated.
+    pub captures: Vec<Option<String>>,
+    /// Unresolved backreference placeholders recorded during first pass:
+    /// (byte_pos_in_output, group_id)
+    pub unresolved_refs: Vec<(usize, usize)>,
+    /// Current output byte length (updated by the caller before generating each token).
+    current_output_len: usize,
 }
  
 impl TokenContext {
@@ -30,6 +38,41 @@ impl TokenContext {
         TokenContext {
             max_repeat,
             captures: Vec::new(),
+            unresolved_refs: Vec::new(),
+            current_output_len: 0,
+        }
+    }
+ 
+    /// Set current output length before generating the next token (byte length).
+    pub fn set_output_len(&mut self, len: usize) {
+        self.current_output_len = len;
+    }
+ 
+    /// Record an unresolved backreference for the current output position.
+    pub fn add_unresolved(&mut self, group_id: usize) {
+        self.unresolved_refs.push((self.current_output_len, group_id));
+    }
+ 
+    /// Record a capture value for a group id (1-based). If group_id == 0 append next slot.
+    pub fn record_capture(&mut self, group_id: usize, s: String) {
+        if group_id == 0 {
+            self.captures.push(Some(s));
+        } else {
+            let slot = group_id.saturating_sub(1);
+            if self.captures.len() <= slot {
+                self.captures.resize(slot + 1, None);
+            }
+            self.captures[slot] = Some(s);
+        }
+    }
+ 
+    /// Return a cloned capture string for a group id if available.
+    pub fn get_capture(&self, group_id: usize) -> Option<String> {
+        let slot = group_id.saturating_sub(1);
+        if slot < self.captures.len() {
+            self.captures[slot].clone()
+        } else {
+            None
         }
     }
 }
