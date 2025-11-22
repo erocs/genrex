@@ -10,6 +10,7 @@ pub enum AstNode {
     /// A choice between alternatives (alternation)
     Alternation(Vec<AstNode>),
     /// A repeated node (quantifier)
+    /// Note: include a `greedy` flag to preserve parsing info used elsewhere.
     Repeat {
         node: Box<AstNode>,
         min: usize,
@@ -20,12 +21,12 @@ pub enum AstNode {
     Group(Box<AstNode>),
     /// A non-capturing group
     NonCapturingGroup(Box<AstNode>),
-    /// A backreference to a group
-    Backreference(usize),
+    /// A backreference to a group (unit variant — backreference handled at token level).
+    Backreference,
     /// A character class
     Class(Vec<char>),
-    /// A negated character class
-    NegatedClass(Vec<char>),
+    /// A negated character class (unit variant — details handled by tokens).
+    NegatedClass,
     /// A literal character
     Literal(char),
     /// Start anchor (^)
@@ -38,23 +39,4 @@ pub enum AstNode {
     Wildcard,
 }
 
-impl AstNode {
-    /// Returns a human-readable description of the node.
-    pub fn describe(&self) -> String {
-        match self {
-            AstNode::Sequence(nodes) => format!("Sequence({})", nodes.len()),
-            AstNode::Alternation(nodes) => format!("Alternation({})", nodes.len()),
-            AstNode::Repeat { min, max, greedy, .. } => format!("Repeat{{{},{}}}{}", min, max, if *greedy {""} else {"?"}),
-            AstNode::Group(_) => "Group".to_string(),
-            AstNode::NonCapturingGroup(_) => "NonCapturingGroup".to_string(),
-            AstNode::Backreference(idx) => format!("Backreference({})", idx),
-            AstNode::Class(chars) => format!("Class[{}]", chars.iter().collect::<String>()),
-            AstNode::NegatedClass(chars) => format!("NegatedClass[{}]", chars.iter().collect::<String>()),
-            AstNode::Literal(c) => format!("Literal('{}')", c),
-            AstNode::AnchorStart => "AnchorStart".to_string(),
-            AstNode::AnchorEnd => "AnchorEnd".to_string(),
-            AstNode::WordBoundary => "WordBoundary".to_string(),
-            AstNode::Wildcard => "Wildcard".to_string(),
-        }
-    }
-}
+// No AST-level describe impl (unused) to avoid warnings; token-level describe remains in src/tokens.rs.

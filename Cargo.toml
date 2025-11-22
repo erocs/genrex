@@ -7,6 +7,14 @@ description = "Generate random strings matching a provided regular expression. A
 license = "MIT"
 repository = "https://github.com/erocs/genrex"
 
+[lib]
+name = "genrex"
+path = "src/lib.rs"
+
+[[bin]]
+name = "genrex-cli"
+path = "src/main.rs"
+
 [dependencies]
 rand = "0.8"
 regex = "1"

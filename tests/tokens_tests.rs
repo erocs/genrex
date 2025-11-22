@@ -62,12 +62,12 @@ fn test_quantifier_token() {
 
 #[test]
 fn test_group_token() {
-    let tok = Token::Group(Box::new(Token::Literal('g')));
+    let tok = Token::Group(Box::new(Token::Literal('g')), 1);
     let mut rng = StdRng::seed_from_u64(6);
     let mut ctx = TokenContext::new();
     let s = tok.generate(&mut rng, &mut ctx).unwrap();
     assert_eq!(s, "g");
-    assert_eq!(tok.describe(), "Group");
+    assert_eq!(tok.describe(), "Group(1)");
 }
 
 #[test]
@@ -88,6 +88,36 @@ fn test_backreference_token_unsupported() {
     let res = tok.generate(&mut rng, &mut ctx);
     assert!(res.is_err());
     assert!(tok.describe().starts_with("Backreference("));
+}
+
+#[test]
+fn test_backreference_token_simple() {
+    // Pattern equivalent: (a)\1 -> should produce "aa"
+    let tok = Token::Concatenation(vec![
+        Token::Group(Box::new(Token::Literal('a')), 1),
+        Token::Backreference(1),
+    ]);
+    let mut rng = StdRng::seed_from_u64(11);
+    let mut ctx = TokenContext::new();
+    let s = tok.generate(&mut rng, &mut ctx).unwrap();
+    assert_eq!(s, "aa");
+}
+
+#[test]
+fn test_backreference_token_repeated() {
+    // Pattern equivalent: ([ab])\1\1 -> produces three identical chars from {a,b}
+    let tok = Token::Concatenation(vec![
+        Token::Group(Box::new(Token::Class(vec!['a', 'b'])), 1),
+        Token::Backreference(1),
+        Token::Backreference(1),
+    ]);
+    let mut rng = StdRng::seed_from_u64(12);
+    let mut ctx = TokenContext::new();
+    let s = tok.generate(&mut rng, &mut ctx).unwrap();
+    assert_eq!(s.len(), 3);
+    let first = s.chars().next().unwrap();
+    assert!(first == 'a' || first == 'b');
+    assert!(s.chars().all(|c| c == first));
 }
 
 #[test]
@@ -114,4 +144,30 @@ fn test_wildcard_token() {
     assert_eq!(s.len(), 1);
     assert!(s.chars().all(|c| c.is_ascii_alphanumeric()));
     assert_eq!(tok.describe(), "Wildcard");
+}
+
+#[test]
+fn test_quantifier_greedy_vs_non_greedy() {
+    // Verify greedy quantifiers tend to choose larger counts than non-greedy ones
+    let greedy = Token::Quantifier {
+        token: Box::new(Token::Literal('z')),
+        min: 0,
+        max: 5,
+        greedy: true,
+    };
+    let lazy = Token::Quantifier {
+        token: Box::new(Token::Literal('z')),
+        min: 0,
+        max: 5,
+        greedy: false,
+    };
+    let mut ctx = TokenContext::new();
+    // Use deterministic per-iteration seeding so both tokens see the same RNG stream for that iteration.
+    for i in 0..200 {
+        let mut rng_g = StdRng::seed_from_u64(0xDEADBEEF + i);
+        let mut rng_l = StdRng::seed_from_u64(0xDEADBEEF + i);
+        let s_g = greedy.generate(&mut rng_g, &mut ctx).unwrap();
+        let s_l = lazy.generate(&mut rng_l, &mut ctx).unwrap();
+        assert!(s_g.len() >= s_l.len(), "greedy len {} should be >= lazy len {}", s_g.len(), s_l.len());
+    }
 }

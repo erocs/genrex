@@ -13,9 +13,10 @@ pub trait RegexToken {
 
 /// Context for token generation (captures, backreferences, etc).
 pub struct TokenContext {
-    // Add fields as needed for group captures, backreferences, etc.
     /// Maximum additional repeats to use when a quantifier has an open-ended max (usize::MAX).
     pub max_repeat: usize,
+    /// Captured group strings in appearance order; index = group number - 1 for backreferences.
+    pub captures: Vec<String>,
 }
  
 impl TokenContext {
@@ -28,6 +29,7 @@ impl TokenContext {
     pub fn new_with_max_repeat(max_repeat: usize) -> Self {
         TokenContext {
             max_repeat,
+            captures: Vec::new(),
         }
     }
 }

@@ -54,13 +54,13 @@ impl<'a> AstParser<'a> {
         let node = match token {
             Token::Literal(c) => AstNode::Literal(*c),
             Token::Class(chars) => AstNode::Class(chars.clone()),
-            Token::NegatedClass(chars) => AstNode::NegatedClass(chars.clone()),
+            Token::NegatedClass(_chars) => AstNode::NegatedClass,
             Token::AnchorStart => AstNode::AnchorStart,
             Token::AnchorEnd => AstNode::AnchorEnd,
             Token::WordBoundary => AstNode::WordBoundary,
             Token::Wildcard => AstNode::Wildcard,
-            Token::Backreference(idx) => AstNode::Backreference(*idx),
-            Token::Group(inner) => AstNode::Group(Box::new(
+            Token::Backreference(_idx) => AstNode::Backreference,
+            Token::Group(inner, _idx) => AstNode::Group(Box::new(
                 AstParser::new(&[(**inner).clone()]).parse().unwrap_or(AstNode::Literal(' '))
             )),
             Token::NonCapturingGroup(inner) => AstNode::NonCapturingGroup(Box::new(

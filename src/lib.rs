@@ -1,6 +1,6 @@
 /// Minimal lexer: converts a regex pattern string into a vector of Tokens.
 /// Only supports literals and character classes for now.
-fn lex_pattern(pattern: &str) -> Vec<Token> {
+fn lex_pattern(pattern: &str, next_group: &mut usize) -> Vec<Token> {
     let mut tokens = Vec::new();
     let mut chars = pattern.chars().peekable();
     while let Some(c) = chars.next() {
@@ -44,7 +44,9 @@ fn lex_pattern(pattern: &str) -> Vec<Token> {
                 }
             }
             '(' => {
-                // Only support non-nested groups for now
+                // Assign a capturing group index and parse its contents.
+                let group_id = *next_group;
+                *next_group += 1;
                 let mut group = String::new();
                 let mut depth = 1;
                 while let Some(next) = chars.next() {
@@ -58,14 +60,14 @@ fn lex_pattern(pattern: &str) -> Vec<Token> {
                         _ => group.push(next),
                     }
                 }
-                let inner_tokens = lex_pattern(&group);
-                tokens.push(Token::Group(Box::new(Token::Concatenation(inner_tokens))));
+                let inner_tokens = lex_pattern(&group, next_group);
+                tokens.push(Token::Group(Box::new(Token::Concatenation(inner_tokens)), group_id));
             }
             '?' => {
                 // Non-capturing group or quantifier
                 if let Some(&':') = chars.peek() {
                     chars.next();
-                    // Parse non-capturing group
+                    // Parse non-capturing group (do NOT assign a group index)
                     let mut group = String::new();
                     let mut depth = 1;
                     while let Some(next) = chars.next() {
@@ -79,23 +81,41 @@ fn lex_pattern(pattern: &str) -> Vec<Token> {
                             _ => group.push(next),
                         }
                     }
-                    let inner_tokens = lex_pattern(&group);
+                    let inner_tokens = lex_pattern(&group, next_group);
                     tokens.push(Token::NonCapturingGroup(Box::new(Token::Concatenation(inner_tokens))));
                 } else {
                     // Quantifier ? (zero or one)
                     if let Some(last) = tokens.pop() {
-                        tokens.push(Token::Quantifier { token: Box::new(last), min: 0, max: 1, greedy: true });
+                        // Support lazy modifier "??" (non-greedy for the '?' quantifier).
+                        let mut greedy = true;
+                        if let Some(&'?') = chars.peek() {
+                            chars.next();
+                            greedy = false;
+                        }
+                        tokens.push(Token::Quantifier { token: Box::new(last), min: 0, max: 1, greedy });
                     }
                 }
             }
             '*' => {
                 if let Some(last) = tokens.pop() {
-                    tokens.push(Token::Quantifier { token: Box::new(last), min: 0, max: usize::MAX, greedy: true });
+                    // Detect lazy modifier "*?" -> non-greedy
+                    let mut greedy = true;
+                    if let Some(&'?') = chars.peek() {
+                        chars.next();
+                        greedy = false;
+                    }
+                    tokens.push(Token::Quantifier { token: Box::new(last), min: 0, max: usize::MAX, greedy });
                 }
             }
             '+' => {
                 if let Some(last) = tokens.pop() {
-                    tokens.push(Token::Quantifier { token: Box::new(last), min: 1, max: usize::MAX, greedy: true });
+                    // Detect lazy modifier "+?" -> non-greedy
+                    let mut greedy = true;
+                    if let Some(&'?') = chars.peek() {
+                        chars.next();
+                        greedy = false;
+                    }
+                    tokens.push(Token::Quantifier { token: Box::new(last), min: 1, max: usize::MAX, greedy });
                 }
             }
             '{' => {
@@ -122,13 +142,19 @@ fn lex_pattern(pattern: &str) -> Vec<Token> {
                 }
                 if let Some('}') = chars.peek() { chars.next(); }
                 if let Some(last) = tokens.pop() {
-                    tokens.push(Token::Quantifier { token: Box::new(last), min, max, greedy: true });
+                    // Detect lazy modifier "{m,n}?" -> non-greedy
+                    let mut greedy = true;
+                    if let Some(&'?') = chars.peek() {
+                        chars.next();
+                        greedy = false;
+                    }
+                    tokens.push(Token::Quantifier { token: Box::new(last), min, max, greedy });
                 }
             }
             '|' => {
                 // Alternation: split tokens at this point
                 let rest: String = chars.collect();
-                let right = lex_pattern(&rest);
+                let right = lex_pattern(&rest, next_group);
                 let left = std::mem::take(&mut tokens);
                 tokens.push(Token::Alternation(vec![Token::Concatenation(left), Token::Concatenation(right)]));
                 break;
@@ -217,6 +243,15 @@ use rand::{distributions::Alphanumeric, RngCore, Rng, SeedableRng, rngs::StdRng}
 use regex::Regex;
 use thiserror::Error;
 use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Global verbose flag — when enabled the crate will print internal warnings and rejection diagnostics.
+pub static VERBOSE: AtomicBool = AtomicBool::new(false);
+
+/// Convenience to set verbosity from binaries.
+pub fn set_verbose(v: bool) {
+    VERBOSE.store(v, Ordering::Relaxed);
+}
 
 #[derive(Debug, Error)]
 pub enum GenError {
@@ -250,13 +285,15 @@ impl Default for GeneratorConfig {
 }
 
 
-/// A generator for strings matching a provided regex, with a configurable PRNG, multiline mode, and parsed AST.
+/// A generator for strings matching a provided regex, with a configurable PRNG, multiline mode, and parsed AST/tokens.
 pub struct RegexGenerator {
     re: Regex,
     config: GeneratorConfig,
     rng: Box<dyn RngCore + Send>,
     multiline: bool,
     ast: Option<AstNode>,
+    /// Lexer tokens (prefer token-based generation when available).
+    tokens: Option<Vec<Token>>,
 }
 
 /// Builder for RegexGenerator.
@@ -265,6 +302,9 @@ pub struct RegexGeneratorBuilder {
     config: GeneratorConfig,
     rng: Option<Box<dyn RngCore + Send>>,
     multiline: bool,
+    /// When true, skip strict `regex::Regex` compilation errors (useful to allow backreferences);
+    /// the generator will fall back to a permissive `.*` matcher and rely on token-generation instead.
+    allow_backrefs: bool,
 }
 
 impl RegexGeneratorBuilder {
@@ -275,6 +315,7 @@ impl RegexGeneratorBuilder {
             config: GeneratorConfig::default(),
             rng: None,
             multiline: false,
+            allow_backrefs: false,
         }
     }
 
@@ -293,25 +334,48 @@ impl RegexGeneratorBuilder {
         self
     }
 
+    /// Allow patterns that the `regex` crate cannot compile (e.g., backreferences).
+    /// When enabled, the generator will skip failing `Regex::new` and use a permissive matcher.
+    pub fn allow_backrefs(mut self) -> Self {
+        self.allow_backrefs = true;
+        self
+    }
+
     pub fn build(self) -> Result<RegexGenerator, GenError> {
-        let re = Regex::new(&self.pattern)
-            .map_err(|e| GenError::InvalidRegex(e.to_string()))?;
+        // Try to compile the regex; if allow_backrefs is enabled, fall back to a permissive matcher on error.
+        let re = if !self.allow_backrefs {
+            Regex::new(&self.pattern).map_err(|e| GenError::InvalidRegex(e.to_string()))?
+        } else {
+            match Regex::new(&self.pattern) {
+                Ok(r) => r,
+                Err(_) => {
+                    if VERBOSE.load(Ordering::Relaxed) {
+                        eprintln!("warning: pattern failed to compile with regex crate; proceeding with token-based generation (allow_backrefs enabled)");
+                    }
+                    Regex::new(".*").unwrap()
+                }
+            }
+        };
+
         let rng: Box<dyn RngCore + Send> = self.rng.unwrap_or_else(|| Box::new(StdRng::from_entropy()));
 
-        // Use the minimal lexer to tokenize the pattern
-        let tokens = lex_pattern(&self.pattern);
+        // Use the minimal lexer to tokenize the pattern (assign group indices)
+        let mut next_group: usize = 1;
+        let tokens = lex_pattern(&self.pattern, &mut next_group);
         let ast = if !tokens.is_empty() {
             AstParser::new(&tokens).parse()
         } else {
             None
         };
 
+        let tokens_field = if tokens.is_empty() { None } else { Some(tokens) };
         Ok(RegexGenerator {
             re,
             config: self.config,
             rng,
             multiline: self.multiline,
             ast,
+            tokens: tokens_field,
         })
     }
 }
@@ -328,23 +392,70 @@ impl RegexGenerator {
         self
     }
 
-    /// Generate one matching string using the AST if available, otherwise fallback to rejection sampling.
+    /// Generate one matching string using lexer tokens if available, then AST, otherwise fallback to rejection sampling.
     pub fn generate_one(&mut self) -> Result<String, GenError> {
+        // 1) Token-based generation (preferred)
+        if let Some(tokens) = &self.tokens {
+            let start = Instant::now();
+            let mut attempts = 0usize;
+            while attempts < self.config.max_attempts {
+                if let Some(timeout) = self.config.timeout {
+                    if start.elapsed() >= timeout { break; }
+                }
+                attempts += 1;
+                let mut ctx = crate::traits::TokenContext::new();
+                let rng = &mut self.rng;
+                let mut out = String::new();
+                let mut ok = true;
+                for t in tokens {
+                    match t.generate(&mut *rng, &mut ctx) {
+                        Ok(s) => out.push_str(&s),
+                        Err(_) => { ok = false; break; }
+                    }
+                }
+                if !ok { continue; }
+                let len = out.len();
+                if len < self.config.min_len || len > self.config.max_len {
+                    if VERBOSE.load(Ordering::Relaxed) {
+                        eprintln!("candidate rejected (len {} not in {}..={}): {}", len, self.config.min_len, self.config.max_len, out);
+                    }
+                    continue;
+                }
+                if self.re.is_match(&out) {
+                    return Ok(out);
+                } else {
+                    if VERBOSE.load(Ordering::Relaxed) {
+                        eprintln!("candidate rejected (regex mismatch): {}", out);
+                    }
+                    continue;
+                }
+            }
+            // If token-based attempts failed, fall through to AST or rejection sampling.
+        }
+
+        // 2) AST-based single-generation (legacy behavior)
         if let Some(ast) = &self.ast {
-            let mut rng = &mut self.rng;
+            let rng = &mut self.rng;
             let mut ctx = crate::traits::TokenContext::new();
             let s = Self::generate_from_ast(ast, &mut *rng, &mut ctx)?;
             let len = s.len();
             if len < self.config.min_len || len > self.config.max_len {
+                if VERBOSE.load(Ordering::Relaxed) {
+                    eprintln!("AST candidate rejected (len {} not in {}..={}): {}", len, self.config.min_len, self.config.max_len, s);
+                }
                 return Err(GenError::NoMatch);
             }
             if self.re.is_match(&s) {
                 return Ok(s);
             } else {
+                if VERBOSE.load(Ordering::Relaxed) {
+                    eprintln!("AST candidate rejected (regex mismatch): {}", s);
+                }
                 return Err(GenError::NoMatch);
             }
         }
-        // fallback: rejection sampling
+
+        // 3) Fallback: rejection sampling
         let start = Instant::now();
         let mut attempts = 0;
         while attempts < self.config.max_attempts {
@@ -386,7 +497,7 @@ impl RegexGenerator {
                     Self::generate_from_ast(&nodes[idx], rng, ctx)
                 }
             }
-            AstNode::Repeat { node, min, max, greedy: _ } => {
+            AstNode::Repeat { node, min, max, greedy } => {
                 if min > max { return Err(GenError::NoMatch); }
                 // Respect TokenContext.max_repeat for open-ended quantifiers.
                 let effective_max = if *max == usize::MAX {
@@ -394,7 +505,15 @@ impl RegexGenerator {
                 } else {
                     *max
                 };
-                let count = if *min == *max { *min } else { rng.gen_range(*min..=effective_max) };
+                let count = if *min == *max {
+                    *min
+                } else {
+                    // Bias selection for greedy vs non-greedy:
+                    // Sample twice and take the larger count for greedy, smaller for non-greedy.
+                    let a = rng.gen_range(*min..=effective_max);
+                    let b = rng.gen_range(*min..=effective_max);
+                    if *greedy { a.max(b) } else { a.min(b) }
+                };
                 let mut out = String::new();
                 for _ in 0..count {
                     out.push_str(&Self::generate_from_ast(node, rng, ctx)?);
@@ -402,7 +521,7 @@ impl RegexGenerator {
                 Ok(out)
             }
             AstNode::Group(inner) | AstNode::NonCapturingGroup(inner) => Self::generate_from_ast(inner, rng, ctx),
-            AstNode::Backreference(_) => Err(GenError::NoMatch), // Not supported
+            AstNode::Backreference => Err(GenError::NoMatch), // Not supported at AST level (handled by tokens)
             AstNode::Class(chars) => {
                 if chars.is_empty() {
                     Err(GenError::NoMatch)
@@ -411,7 +530,7 @@ impl RegexGenerator {
                     Ok(chars[idx].to_string())
                 }
             }
-            AstNode::NegatedClass(_) => Err(GenError::NoMatch), // Not supported
+            AstNode::NegatedClass => Err(GenError::NoMatch), // Not supported
             AstNode::Literal(c) => Ok(c.to_string()),
             AstNode::AnchorStart | AstNode::AnchorEnd | AstNode::WordBoundary => Ok(String::new()),
             AstNode::Wildcard => {
@@ -443,6 +562,7 @@ impl Default for RegexGenerator {
             rng: Box::new(StdRng::from_entropy()),
             multiline: false,
             ast: None,
+            tokens: None,
         }
     }
 }
