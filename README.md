@@ -1,10 +1,9 @@
 # genrex
 
-Generate random strings matching a provided regular expression. Minimal MVP crate and CLI.
+Generate random strings matching a provided regular expression. Crate and CLI.
 
 ## Quick links
 - Repository: https://github.com/erocs/genrex
-- Package metadata: [`Cargo.toml`](Cargo.toml:1)
 - CLI binary: [`genrex-cli`](src/main.rs:14)
 - Library builder: [`RegexGeneratorBuilder::new`](src/lib.rs:388)
 
@@ -102,15 +101,3 @@ cargo test
 ```
 
 Reference existing tests: [`tests/traits_tests.rs`](tests/traits_tests.rs:1), [`tests/tokens_tests.rs`](tests/tokens_tests.rs:1)
-
-## Contributing
-- Please follow the code style in the repo and add tests for new features.
-- See top-level design notes: [`agent/TOP_LEVEL_DESIGN.md`](agent/TOP_LEVEL_DESIGN.md:1) and design doc: [`agent/EXHAUSTIVE_ENGINEERING_DESIGN.md`](agent/EXHAUSTIVE_ENGINEERING_DESIGN.md:1)
-
-## License
-MIT — see [`LICENSE`](LICENSE:1)
-
-## Contact
-Maintainer: erocs <github@erocs.org> (see [`Cargo.toml`](Cargo.toml:1))
-
--- end --
