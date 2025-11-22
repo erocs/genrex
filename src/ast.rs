@@ -3,6 +3,10 @@
 // use crate::tokens::Token; // removed unused import
 
 /// The semantic AST node for a regex expression.
+/// DEPRECATED: AST is retained as a legacy fallback for AST-based generation.
+/// Prefer token-based generation (lexer tokens + TokenContext) for primary behavior.
+/// TODO: remove AST and parser or reintroduce only when AST-based sampling/analysis is implemented.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum AstNode {
     /// A sequence of nodes (concatenation)
