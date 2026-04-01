@@ -76,11 +76,6 @@ impl TokenContext {
         }
     }
 }
-// Traits for the genrex library API interface.
-
-
-// use crate::error::GenrexError; // removed duplicate/unnecessary import
-
 
 /// Trait for generating random strings matching a regex.
 pub trait RegexStringGenerator {

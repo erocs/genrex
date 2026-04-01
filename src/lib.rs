@@ -171,28 +171,15 @@ pub use crate::error::GenrexError;
 mod traits;
 mod error;
 mod tokens;
-mod ast;
-mod parser;
 pub use crate::tokens::Token;
 pub use crate::traits::{RegexToken, TokenContext};
-// use crate::traits::{RegexStringGenerator, GeneratorConfigurable, GenerationAgent}; // removed duplicate import, now re-exported
-// use crate::error::GenrexError; // removed duplicate import, now re-exported
-// use crate::tokens::Token; // removed duplicate import, now re-exported
-use crate::parser::AstParser;
-use crate::ast::AstNode;
 impl RegexStringGenerator for RegexGenerator {
     fn generate_one(&mut self) -> Result<String, GenrexError> {
-        self.generate_one().map_err(|e| match e {
-            GenError::InvalidRegex(s) => GenrexError::InvalidRegex(s),
-            GenError::NoMatch => GenrexError::NoMatch,
-        })
+        self.generate_one()
     }
 
     fn generate_n(&mut self, n: usize) -> Result<Vec<String>, GenrexError> {
-        self.generate_n(n).map_err(|e| match e {
-            GenError::InvalidRegex(s) => GenrexError::InvalidRegex(s),
-            GenError::NoMatch => GenrexError::NoMatch,
-        })
+        self.generate_n(n)
     }
 
     fn is_multiline(&self) -> bool {
@@ -225,23 +212,12 @@ impl GeneratorConfigurable for RegexGenerator {
 
 impl GenerationAgent for RegexGenerator {
     fn generate_with_strategy(&mut self, _strategy: &str) -> Result<String, GenrexError> {
-        // For now, just call the default generator
-        self.generate_one().map_err(|e| match e {
-            GenError::InvalidRegex(s) => GenrexError::InvalidRegex(s),
-            GenError::NoMatch => GenrexError::NoMatch,
-        })
+        self.generate_one()
     }
 }
-// genrex — minimal MVP crate to generate random strings matching a regex (rejection sampling).
-//
-// Limitations (MVP):
-// - Uses rejection sampling over ASCII alphanumeric characters.
-// - No support for backreferences/lookarounds.
-// - May be inefficient for very constrained patterns; later versions will add AST->NFA bounded sampling.
 
 use rand::{distributions::Alphanumeric, RngCore, Rng, SeedableRng, rngs::StdRng};
 use regex::Regex;
-use thiserror::Error;
 use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -251,15 +227,6 @@ pub static VERBOSE: AtomicBool = AtomicBool::new(false);
 /// Convenience to set verbosity from binaries.
 pub fn set_verbose(v: bool) {
     VERBOSE.store(v, Ordering::Relaxed);
-}
-
-#[derive(Debug, Error)]
-pub enum GenError {
-    #[error("invalid regex: {0}")]
-    InvalidRegex(String),
-
-    #[error("no match found within constraints")]
-    NoMatch,
 }
 
 /// Configuration for the generator.
@@ -285,14 +252,12 @@ impl Default for GeneratorConfig {
 }
 
 
-/// A generator for strings matching a provided regex, with a configurable PRNG, multiline mode, and parsed AST/tokens.
+/// A generator for strings matching a provided regex, with a configurable PRNG, multiline mode, and parsed tokens.
 pub struct RegexGenerator {
     re: Regex,
     config: GeneratorConfig,
     rng: Box<dyn RngCore + Send>,
     multiline: bool,
-    ast: Option<AstNode>,
-    /// Lexer tokens (prefer token-based generation when available).
     tokens: Option<Vec<Token>>,
     /// Number of capturing groups discovered by the lexer.
     group_count: usize,
@@ -343,10 +308,10 @@ impl RegexGeneratorBuilder {
         self
     }
 
-    pub fn build(self) -> Result<RegexGenerator, GenError> {
+    pub fn build(self) -> Result<RegexGenerator, GenrexError> {
         // Try to compile the regex; if allow_backrefs is enabled, fall back to a permissive matcher on error.
         let re = if !self.allow_backrefs {
-            Regex::new(&self.pattern).map_err(|e| GenError::InvalidRegex(e.to_string()))?
+            Regex::new(&self.pattern).map_err(|e| GenrexError::InvalidRegex(e.to_string()))?
         } else {
             match Regex::new(&self.pattern) {
                 Ok(r) => r,
@@ -361,23 +326,15 @@ impl RegexGeneratorBuilder {
 
         let rng: Box<dyn RngCore + Send> = self.rng.unwrap_or_else(|| Box::new(StdRng::from_entropy()));
 
-        // Use the minimal lexer to tokenize the pattern (assign group indices)
         let mut next_group: usize = 1;
         let tokens = lex_pattern(&self.pattern, &mut next_group);
-        let ast = if !tokens.is_empty() {
-            AstParser::new(&tokens).parse()
-        } else {
-            None
-        };
-
-        let tokens_field = if tokens.is_empty() { None } else { Some(tokens) };
+        let tokens = if tokens.is_empty() { None } else { Some(tokens) };
         Ok(RegexGenerator {
             re,
             config: self.config,
             rng,
             multiline: self.multiline,
-            ast,
-            tokens: tokens_field,
+            tokens,
             group_count: next_group.saturating_sub(1),
         })
     }
@@ -395,8 +352,8 @@ impl RegexGenerator {
         self
     }
 
-    /// Generate one matching string using lexer tokens if available, then AST, otherwise fallback to rejection sampling.
-    pub fn generate_one(&mut self) -> Result<String, GenError> {
+    /// Generate one matching string using lexer tokens if available, otherwise fallback to rejection sampling.
+    pub fn generate_one(&mut self) -> Result<String, GenrexError> {
         // 1) Token-based generation (preferred)
         if let Some(tokens) = &self.tokens {
             let start = Instant::now();
@@ -472,32 +429,9 @@ impl RegexGenerator {
                     continue;
                 }
             }
-            // If token-based attempts failed, fall through to AST or rejection sampling.
         }
 
-        // 2) AST-based single-generation (legacy behavior)
-        if let Some(ast) = &self.ast {
-            let rng = &mut self.rng;
-            let mut ctx = crate::traits::TokenContext::new();
-            let s = Self::generate_from_ast(ast, &mut *rng, &mut ctx)?;
-            let len = s.len();
-            if len < self.config.min_len || len > self.config.max_len {
-                if VERBOSE.load(Ordering::Relaxed) {
-                    eprintln!("AST candidate rejected (len {} not in {}..={}): {}", len, self.config.min_len, self.config.max_len, s);
-                }
-                return Err(GenError::NoMatch);
-            }
-            if self.re.is_match(&s) {
-                return Ok(s);
-            } else {
-                if VERBOSE.load(Ordering::Relaxed) {
-                    eprintln!("AST candidate rejected (regex mismatch): {}", s);
-                }
-                return Err(GenError::NoMatch);
-            }
-        }
-
-        // 3) Fallback: rejection sampling
+        // 2) Fallback: rejection sampling
         let start = Instant::now();
         let mut attempts = 0;
         while attempts < self.config.max_attempts {
@@ -517,74 +451,11 @@ impl RegexGenerator {
                 return Ok(s);
             }
         }
-        Err(GenError::NoMatch)
-    }
-
-    /// Recursively generate a string from the AST node.
-    fn generate_from_ast<R: rand::Rng + ?Sized>(node: &AstNode, rng: &mut R, ctx: &mut crate::traits::TokenContext) -> Result<String, GenError> {
-        use crate::ast::AstNode;
-        match node {
-            AstNode::Sequence(nodes) => {
-                let mut out = String::new();
-                for n in nodes {
-                    out.push_str(&Self::generate_from_ast(n, rng, ctx)?);
-                }
-                Ok(out)
-            }
-            AstNode::Alternation(nodes) => {
-                if nodes.is_empty() {
-                    Ok(String::new())
-                } else {
-                    let idx = rng.gen_range(0..nodes.len());
-                    Self::generate_from_ast(&nodes[idx], rng, ctx)
-                }
-            }
-            AstNode::Repeat { node, min, max, greedy } => {
-                if min > max { return Err(GenError::NoMatch); }
-                // Respect TokenContext.max_repeat for open-ended quantifiers.
-                let effective_max = if *max == usize::MAX {
-                    (*min).saturating_add(ctx.max_repeat)
-                } else {
-                    *max
-                };
-                let count = if *min == *max {
-                    *min
-                } else {
-                    // Bias selection for greedy vs non-greedy:
-                    // Sample twice and take the larger count for greedy, smaller for non-greedy.
-                    let a = rng.gen_range(*min..=effective_max);
-                    let b = rng.gen_range(*min..=effective_max);
-                    if *greedy { a.max(b) } else { a.min(b) }
-                };
-                let mut out = String::new();
-                for _ in 0..count {
-                    out.push_str(&Self::generate_from_ast(node, rng, ctx)?);
-                }
-                Ok(out)
-            }
-            AstNode::Group(inner) | AstNode::NonCapturingGroup(inner) => Self::generate_from_ast(inner, rng, ctx),
-            AstNode::Backreference => Err(GenError::NoMatch), // Not supported at AST level (handled by tokens)
-            AstNode::Class(chars) => {
-                if chars.is_empty() {
-                    Err(GenError::NoMatch)
-                } else {
-                    let idx = rng.gen_range(0..chars.len());
-                    Ok(chars[idx].to_string())
-                }
-            }
-            AstNode::NegatedClass => Err(GenError::NoMatch), // Not supported
-            AstNode::Literal(c) => Ok(c.to_string()),
-            AstNode::AnchorStart | AstNode::AnchorEnd | AstNode::WordBoundary => Ok(String::new()),
-            AstNode::Wildcard => {
-                const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-                let idx = rng.gen_range(0..ALPHABET.len());
-                Ok((ALPHABET[idx] as char).to_string())
-            }
-        }
+        Err(GenrexError::NoMatch)
     }
 
     /// Convenience: generate n matches (may return fewer if generator hit limits).
-    pub fn generate_n(&mut self, n: usize) -> Result<Vec<String>, GenError> {
+    pub fn generate_n(&mut self, n: usize) -> Result<Vec<String>, GenrexError> {
         let mut out = Vec::with_capacity(n);
         for _ in 0..n {
             match self.generate_one() {
@@ -603,7 +474,6 @@ impl Default for RegexGenerator {
             config: GeneratorConfig::default(),
             rng: Box::new(StdRng::from_entropy()),
             multiline: false,
-            ast: None,
             tokens: None,
             group_count: 0,
         }
