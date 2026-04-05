@@ -455,6 +455,56 @@ fn test_configurable_trait_methods() {
     // No panic means pass
 }
 
+// ── Large quantifiers ─────────────────────────────────────────────────────────
+
+#[test]
+fn test_fixed_quantifier_100_no_explicit_max_len() {
+    // \w{100} must produce exactly 100 chars even when no explicit max_len is set.
+    for seed in 0u64..5 {
+        let mut g = RegexGenerator::builder("\\w{100}")
+            .rng(StdRng::seed_from_u64(seed))
+            .build()
+            .expect("\\w{100} should build");
+        let s = g.generate_one().expect("\\w{100} should generate");
+        assert_eq!(s.len(), 100,
+            "\\w{{100}} must produce exactly 100 chars; seed={} got {:?}", seed, s);
+        assert!(s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+    }
+}
+
+#[test]
+fn test_range_quantifier_not_always_min() {
+    // \w{1,100} must not always produce 1 char — the length must vary.
+    let mut g = RegexGenerator::builder("\\w{1,100}")
+        .rng(StdRng::seed_from_u64(7))
+        .build()
+        .expect("\\w{1,100} should build");
+    let lengths: Vec<usize> = (0..50).map(|_| g.generate_one().unwrap().len()).collect();
+    assert!(lengths.iter().all(|&l| (1..=100).contains(&l)),
+        "every length must be in [1,100]; got: {:?}", lengths);
+    assert!(lengths.iter().any(|&l| l > 1),
+        "\\w{{1,100}} must not always produce 1 char; lengths: {:?}", lengths);
+    assert!(lengths.iter().any(|&l| l > 64),
+        "\\w{{1,100}} must sometimes exceed 64 (old default max_len); lengths: {:?}", lengths);
+    let distinct: std::collections::HashSet<_> = lengths.iter().copied().collect();
+    assert!(distinct.len() >= 10,
+        "\\w{{1,100}} must produce at least 10 distinct lengths; got: {:?}", distinct);
+}
+
+#[test]
+fn test_range_quantifier_with_space_around_comma() {
+    // {1, 100} with whitespace around the comma must be treated identically to {1,100}.
+    let mut g = RegexGenerator::builder("\\w{1, 100}")
+        .rng(StdRng::seed_from_u64(7))
+        .build()
+        .expect("\\w{1, 100} should build");
+    let lengths: Vec<usize> = (0..50).map(|_| g.generate_one().unwrap().len()).collect();
+    assert!(lengths.iter().all(|&l| (1..=100).contains(&l)),
+        "every length must be in [1,100]; got: {:?}", lengths);
+    assert!(lengths.iter().any(|&l| l > 1),
+        "\\w{{1, 100}} must not always produce 1 char; lengths: {:?}", lengths);
+}
+
 #[test]
 fn test_generate_with_strategy_success() {
     let mut generator = DummyGenerator::new(".*", GeneratorConfig::default(), 42, true);

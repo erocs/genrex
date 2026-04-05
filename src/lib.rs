@@ -148,7 +148,7 @@ fn lex_pattern(pattern: &str, next_group: &mut usize) -> Vec<Token> {
                     if ch == ',' || ch == '}' { break; }
                     num.push(chars.next().unwrap());
                 }
-                let min = num.parse::<usize>().unwrap_or(0);
+                let min = num.trim().parse::<usize>().unwrap_or(0);
                 let mut max = min;
                 if let Some(&',') = chars.peek() {
                     chars.next();
@@ -157,8 +157,8 @@ fn lex_pattern(pattern: &str, next_group: &mut usize) -> Vec<Token> {
                         if ch == '}' { break; }
                         num2.push(chars.next().unwrap());
                     }
-                    if !num2.is_empty() {
-                        max = num2.parse::<usize>().unwrap_or(min);
+                    if !num2.trim().is_empty() {
+                        max = num2.trim().parse::<usize>().unwrap_or(min);
                     } else {
                         max = usize::MAX;
                     }
@@ -196,6 +196,45 @@ mod error;
 mod tokens;
 pub use crate::tokens::Token;
 pub use crate::traits::{RegexToken, TokenContext};
+
+/// Returns the minimum number of characters this token will generate.
+fn token_min_len(token: &Token) -> usize {
+    match token {
+        Token::Literal(_) | Token::Class(_) | Token::NegatedClass(_) | Token::Wildcard => 1,
+        Token::Concatenation(tokens) => tokens.iter().map(token_min_len).sum(),
+        Token::Alternation(choices) => choices.iter().map(token_min_len).min().unwrap_or(0),
+        Token::Quantifier { token, min, .. } => min * token_min_len(token),
+        Token::Group(inner, _) | Token::NonCapturingGroup(inner) => token_min_len(inner),
+        Token::AnchorStart | Token::AnchorEnd | Token::WordBoundary | Token::Backreference(_) => 0,
+    }
+}
+
+/// Returns the maximum number of characters this token can generate, or `None` if unbounded.
+fn token_max_len(token: &Token) -> Option<usize> {
+    match token {
+        Token::Literal(_) | Token::Class(_) | Token::NegatedClass(_) | Token::Wildcard => Some(1),
+        Token::Concatenation(tokens) => {
+            let mut total = 0usize;
+            for t in tokens {
+                total = total.saturating_add(token_max_len(t)?);
+            }
+            Some(total)
+        }
+        Token::Alternation(choices) => {
+            let mut best = 0usize;
+            for c in choices {
+                best = best.max(token_max_len(c)?);
+            }
+            Some(best)
+        }
+        Token::Quantifier { token, max, .. } if *max == usize::MAX => None,
+        Token::Quantifier { token, max, .. } => {
+            Some(token_max_len(token)?.saturating_mul(*max))
+        }
+        Token::Group(inner, _) | Token::NonCapturingGroup(inner) => token_max_len(inner),
+        Token::AnchorStart | Token::AnchorEnd | Token::WordBoundary | Token::Backreference(_) => Some(0),
+    }
+}
 impl RegexStringGenerator for RegexGenerator {
     fn generate_one(&mut self) -> Result<String, GenrexError> {
         self.generate_one()
@@ -356,10 +395,31 @@ impl RegexGeneratorBuilder {
         let mut next_group: usize = 1;
         let tokens = lex_pattern(&self.pattern, &mut next_group);
         let tokens = if tokens.is_empty() { None } else { Some(tokens) };
+
+        // Auto-raise max_len so the pattern's required output length is never
+        // unconditionally rejected by the length filter.
+        let mut config = self.config;
+        if let Some(toks) = &tokens {
+            let pattern_min: usize = toks.iter().map(token_min_len).sum();
+            if pattern_min > config.max_len {
+                config.max_len = pattern_min;
+            }
+            // For bounded patterns, also raise max_len to the pattern's max so the
+            // full quantifier range is reachable (e.g. \w{1,100} can produce 100 chars).
+            let pattern_max = toks.iter().try_fold(0usize, |acc, t| {
+                token_max_len(t).map(|n| acc.saturating_add(n))
+            });
+            if let Some(pat_max) = pattern_max {
+                if pat_max > config.max_len {
+                    config.max_len = pat_max;
+                }
+            }
+        }
+
         Ok(RegexGenerator {
             re,
             re_is_fallback,
-            config: self.config,
+            config,
             rng,
             multiline: self.multiline,
             tokens,
@@ -519,6 +579,39 @@ mod tests {
     use super::*;
     use rand::rngs::StdRng;
     use rand::SeedableRng;
+
+    #[test]
+    fn fixed_quantifier_exceeding_default_max_len() {
+        // \w{100} requires 100 chars; default max_len is 64 but should be auto-raised.
+        let mut g = RegexGenerator::builder("\\w{100}")
+            .rng(StdRng::seed_from_u64(1))
+            .build()
+            .expect("compile regex");
+        let s = g.generate_one().expect("should generate 100 chars");
+        assert_eq!(s.len(), 100, "\\w{{100}} must produce exactly 100 characters");
+        assert!(s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+    }
+
+    #[test]
+    fn range_quantifier_uses_full_range() {
+        // \w{1,100} should produce varied lengths across the full [1,100] range.
+        // Use a single generator (one regex compilation) and call generate_one many times.
+        let mut g = RegexGenerator::builder("\\w{1,100}")
+            .rng(StdRng::seed_from_u64(42))
+            .build()
+            .expect("compile regex");
+        let mut saw_above_64 = false;
+        let mut saw_above_1 = false;
+        for _ in 0..100 {
+            let s = g.generate_one().expect("should generate");
+            let len = s.len();
+            assert!((1..=100).contains(&len), "length {} out of [1,100]", len);
+            if len > 64 { saw_above_64 = true; }
+            if len > 1  { saw_above_1  = true; }
+        }
+        assert!(saw_above_1,  "\\w{{1,100}} must not always produce length 1");
+        assert!(saw_above_64, "\\w{{1,100}} should sometimes produce strings longer than 64 chars");
+    }
 
     #[test]
     fn generates_simple_literal_or_times_out() {
