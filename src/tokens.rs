@@ -39,9 +39,17 @@ impl RegexToken for Token {
 					Ok(chars[idx].to_string())
 				}
 			}
-			Token::NegatedClass(_chars) => {
-				// Negated class generation would require full alphabet context
-				Err(GenrexError::UnsupportedFeature("Negated class generation".to_string()))
+			Token::NegatedClass(excluded) => {
+				// Generate a character from printable ASCII (0x20–0x7E) that is not in the excluded set.
+				let chars: Vec<char> = (0x20u8..=0x7Eu8)
+					.map(|b| b as char)
+					.filter(|c| !excluded.contains(c))
+					.collect();
+				if chars.is_empty() {
+					return Err(GenrexError::Internal("NegatedClass: all printable ASCII chars are excluded".to_string()));
+				}
+				let idx = rng.gen_range(0..chars.len());
+				Ok(chars[idx].to_string())
 			}
 			Token::Concatenation(tokens) => {
 				let mut out = String::new();
@@ -113,10 +121,9 @@ impl RegexToken for Token {
 			}
 			Token::AnchorStart | Token::AnchorEnd | Token::WordBoundary => Ok(String::new()),
 			Token::Wildcard => {
-				// For MVP, use ASCII alphanumeric
-				const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-				let idx = rng.gen_range(0..ALPHABET.len());
-				Ok((ALPHABET[idx] as char).to_string())
+				// '.' matches any character except newline; sample from printable ASCII (0x20–0x7E).
+				let b = rng.gen_range(0x20u8..=0x7Eu8);
+				Ok((b as char).to_string())
 			}
 		}
 	}

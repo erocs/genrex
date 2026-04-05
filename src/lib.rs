@@ -8,7 +8,7 @@ fn lex_pattern(pattern: &str, next_group: &mut usize) -> Vec<Token> {
             '[' => {
                 let mut class = Vec::new();
                 let mut negated = false;
-                if let Some('^') = chars.peek() {
+                if chars.peek() == Some(&'^') {
                     chars.next();
                     negated = true;
                 }
@@ -17,7 +17,29 @@ fn lex_pattern(pattern: &str, next_group: &mut usize) -> Vec<Token> {
                         chars.next();
                         break;
                     }
-                    class.push(chars.next().unwrap());
+                    let c = chars.next().unwrap();
+                    // Check for range syntax `c-X` where X is not `]`.
+                    if chars.peek() == Some(&'-') {
+                        let mut lookahead = chars.clone();
+                        lookahead.next(); // skip '-'
+                        match lookahead.peek() {
+                            Some(&']') | None => {
+                                // '-' is a literal at the end of the class.
+                                class.push(c);
+                            }
+                            Some(_) => {
+                                chars.next(); // consume '-'
+                                let end = chars.next().unwrap();
+                                for cp in (c as u32)..=(end as u32) {
+                                    if let Some(ch) = char::from_u32(cp) {
+                                        class.push(ch);
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        class.push(c);
+                    }
                 }
                 if negated {
                     tokens.push(Token::NegatedClass(class));
@@ -44,9 +66,26 @@ fn lex_pattern(pattern: &str, next_group: &mut usize) -> Vec<Token> {
                 }
             }
             '(' => {
-                // Assign a capturing group index and parse its contents.
-                let group_id = *next_group;
-                *next_group += 1;
+                // Detect (?:…) non-capturing group before assigning a group id.
+                // We must peek two chars ahead: '?' then ':'.
+                let is_non_capturing = chars.peek() == Some(&'?') && {
+                    let mut lookahead = chars.clone();
+                    lookahead.next(); // skip '?'
+                    lookahead.peek() == Some(&':')
+                };
+                if is_non_capturing {
+                    chars.next(); // consume '?'
+                    chars.next(); // consume ':'
+                }
+                // Reserve the group id now, before parsing inner content, so that
+                // nested groups receive higher ids than their enclosing group.
+                let group_id = if !is_non_capturing {
+                    let id = *next_group;
+                    *next_group += 1;
+                    id
+                } else {
+                    0 // unused for non-capturing groups
+                };
                 let mut group = String::new();
                 let mut depth = 1;
                 while let Some(next) = chars.next() {
@@ -61,39 +100,23 @@ fn lex_pattern(pattern: &str, next_group: &mut usize) -> Vec<Token> {
                     }
                 }
                 let inner_tokens = lex_pattern(&group, next_group);
-                tokens.push(Token::Group(Box::new(Token::Concatenation(inner_tokens)), group_id));
-            }
-            '?' => {
-                // Non-capturing group or quantifier
-                if let Some(&':') = chars.peek() {
-                    chars.next();
-                    // Parse non-capturing group (do NOT assign a group index)
-                    let mut group = String::new();
-                    let mut depth = 1;
-                    while let Some(next) = chars.next() {
-                        match next {
-                            '(' => { depth += 1; group.push(next); },
-                            ')' => {
-                                depth -= 1;
-                                if depth == 0 { break; }
-                                group.push(next);
-                            }
-                            _ => group.push(next),
-                        }
-                    }
-                    let inner_tokens = lex_pattern(&group, next_group);
+                if is_non_capturing {
                     tokens.push(Token::NonCapturingGroup(Box::new(Token::Concatenation(inner_tokens))));
                 } else {
-                    // Quantifier ? (zero or one)
-                    if let Some(last) = tokens.pop() {
-                        // Support lazy modifier "??" (non-greedy for the '?' quantifier).
-                        let mut greedy = true;
-                        if let Some(&'?') = chars.peek() {
-                            chars.next();
-                            greedy = false;
-                        }
-                        tokens.push(Token::Quantifier { token: Box::new(last), min: 0, max: 1, greedy });
+                    tokens.push(Token::Group(Box::new(Token::Concatenation(inner_tokens)), group_id));
+                }
+            }
+            '?' => {
+                // Quantifier ? (zero or one). (?:…) non-capturing groups are handled
+                // entirely by the '(' branch above, so '?' here is always a quantifier.
+                if let Some(last) = tokens.pop() {
+                    // Support lazy modifier "??" (non-greedy for the '?' quantifier).
+                    let mut greedy = true;
+                    if chars.peek() == Some(&'?') {
+                        chars.next();
+                        greedy = false;
                     }
+                    tokens.push(Token::Quantifier { token: Box::new(last), min: 0, max: 1, greedy });
                 }
             }
             '*' => {
@@ -255,6 +278,10 @@ impl Default for GeneratorConfig {
 /// A generator for strings matching a provided regex, with a configurable PRNG, multiline mode, and parsed tokens.
 pub struct RegexGenerator {
     re: Regex,
+    /// True when `allow_backrefs` caused `re` to be substituted with `.*`.
+    /// In that case regex-based validation and rejection sampling are skipped;
+    /// only token-based generation is used.
+    re_is_fallback: bool,
     config: GeneratorConfig,
     rng: Box<dyn RngCore + Send>,
     multiline: bool,
@@ -310,16 +337,16 @@ impl RegexGeneratorBuilder {
 
     pub fn build(self) -> Result<RegexGenerator, GenrexError> {
         // Try to compile the regex; if allow_backrefs is enabled, fall back to a permissive matcher on error.
-        let re = if !self.allow_backrefs {
-            Regex::new(&self.pattern).map_err(|e| GenrexError::InvalidRegex(e.to_string()))?
+        let (re, re_is_fallback) = if !self.allow_backrefs {
+            (Regex::new(&self.pattern).map_err(|e| GenrexError::InvalidRegex(e.to_string()))?, false)
         } else {
             match Regex::new(&self.pattern) {
-                Ok(r) => r,
+                Ok(r) => (r, false),
                 Err(_) => {
                     if VERBOSE.load(Ordering::Relaxed) {
                         eprintln!("warning: pattern failed to compile with regex crate; proceeding with token-based generation (allow_backrefs enabled)");
                     }
-                    Regex::new(".*").unwrap()
+                    (Regex::new(".*").unwrap(), true)
                 }
             }
         };
@@ -331,6 +358,7 @@ impl RegexGeneratorBuilder {
         let tokens = if tokens.is_empty() { None } else { Some(tokens) };
         Ok(RegexGenerator {
             re,
+            re_is_fallback,
             config: self.config,
             rng,
             multiline: self.multiline,
@@ -420,7 +448,7 @@ impl RegexGenerator {
                     }
                     continue;
                 }
-                if self.re.is_match(&out) {
+                if self.re_is_fallback || self.re.is_match(&out) {
                     return Ok(out);
                 } else {
                     if VERBOSE.load(Ordering::Relaxed) {
@@ -431,7 +459,12 @@ impl RegexGenerator {
             }
         }
 
-        // 2) Fallback: rejection sampling
+        // 2) Fallback: rejection sampling (only when a real regex is available for validation).
+        // When re_is_fallback is true the compiled regex is `.*` and accepts anything, so
+        // rejection sampling would return arbitrary strings — skip it entirely.
+        if self.re_is_fallback {
+            return Err(GenrexError::NoMatch);
+        }
         let start = Instant::now();
         let mut attempts = 0;
         while attempts < self.config.max_attempts {
@@ -471,6 +504,7 @@ impl Default for RegexGenerator {
     fn default() -> Self {
         RegexGenerator {
             re: Regex::new(".*").unwrap(),
+            re_is_fallback: false,
             config: GeneratorConfig::default(),
             rng: Box::new(StdRng::from_entropy()),
             multiline: false,

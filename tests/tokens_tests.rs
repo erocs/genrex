@@ -142,7 +142,7 @@ fn test_wildcard_token() {
     let mut ctx = TokenContext::new();
     let s = tok.generate(&mut rng, &mut ctx).unwrap();
     assert_eq!(s.len(), 1);
-    assert!(s.chars().all(|c| c.is_ascii_alphanumeric()));
+    assert!(s.chars().all(|c| c.is_ascii() && !c.is_ascii_control()));
     assert_eq!(tok.describe(), "Wildcard");
 }
 
@@ -169,5 +169,57 @@ fn test_quantifier_greedy_vs_non_greedy() {
         let s_g = greedy.generate(&mut rng_g, &mut ctx).unwrap();
         let s_l = lazy.generate(&mut rng_l, &mut ctx).unwrap();
         assert!(s_g.len() >= s_l.len(), "greedy len {} should be >= lazy len {}", s_g.len(), s_l.len());
+    }
+}
+
+#[test]
+fn test_negated_class_token_ok() {
+    let tok = Token::NegatedClass(vec!['a', 'b', 'c']);
+    let mut rng = StdRng::seed_from_u64(1);
+    let mut ctx = TokenContext::new();
+    let result = tok.generate(&mut rng, &mut ctx);
+    assert!(result.is_ok(), "NegatedClass should generate successfully; got {:?}", result);
+}
+
+#[test]
+fn test_negated_class_token_excludes_chars() {
+    let tok = Token::NegatedClass("abc".chars().collect());
+    for seed in 0u64..100 {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut ctx = TokenContext::new();
+        let s = tok.generate(&mut rng, &mut ctx).expect("NegatedClass token should not error");
+        assert_eq!(s.len(), 1);
+        let c = s.chars().next().unwrap();
+        assert!(!"abc".contains(c), "NegatedClass(['a','b','c']) must not produce a, b, or c; got {:?}", c);
+    }
+}
+
+#[test]
+fn test_wildcard_token_produces_non_alphanumeric() {
+    // Wildcard samples from all printable ASCII, so across many seeds it must
+    // produce at least one non-alphanumeric character.
+    let tok = Token::Wildcard;
+    let mut saw_non_alnum = false;
+    for seed in 0u64..500 {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut ctx = TokenContext::new();
+        let s = tok.generate(&mut rng, &mut ctx).unwrap();
+        let c = s.chars().next().unwrap();
+        assert!(c.is_ascii() && c != '\n', "Wildcard must produce printable ASCII (not newline)");
+        if !c.is_ascii_alphanumeric() {
+            saw_non_alnum = true;
+        }
+    }
+    assert!(saw_non_alnum, "Wildcard should produce non-alphanumeric chars across 500 seeds");
+}
+
+#[test]
+fn test_wildcard_token_never_produces_newline() {
+    let tok = Token::Wildcard;
+    for seed in 0u64..500 {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut ctx = TokenContext::new();
+        let s = tok.generate(&mut rng, &mut ctx).unwrap();
+        assert!(!s.contains('\n'), "Wildcard must not produce newline; got {:?}", s);
     }
 }

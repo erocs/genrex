@@ -101,7 +101,7 @@ fn test_wildcard_trait() {
     println!("Wildcard: {:?}", result);
     let s = result.unwrap();
     assert_eq!(s.len(), 1);
-    assert!(s.chars().all(|c| c.is_ascii_alphanumeric()));
+    assert!(s.chars().all(|c| c.is_ascii() && !c.is_ascii_control()));
 }
 // Unit tests for the genrex API traits and error handling.
 
@@ -196,6 +196,255 @@ fn test_generate_n_success() {
             assert!(s.starts_with("foo"));
         }
     }
+}
+
+// ── Character class range expansion ──────────────────────────────────────────
+
+#[test]
+fn test_class_range_lowercase_letters_only() {
+    // [a-z]{20}: every character must be a lowercase letter, not '-'.
+    let mut g = RegexGenerator::builder("[a-z]{20}")
+        .config(GeneratorConfig { min_len: 20, max_len: 20, max_attempts: 1_000, timeout: None })
+        .rng(StdRng::seed_from_u64(1))
+        .build()
+        .unwrap();
+    let s = g.generate_one().unwrap();
+    assert_eq!(s.len(), 20);
+    assert!(s.chars().all(|c| c.is_ascii_lowercase()), "[a-z]{{20}} must be lowercase letters, got: {:?}", s);
+}
+
+#[test]
+fn test_class_range_lowercase_covers_alphabet() {
+    // [a-z] must produce characters beyond just the literal endpoints {a, z}.
+    let mut seen = std::collections::HashSet::<char>::new();
+    for seed in 0u64..500 {
+        let mut g = RegexGenerator::builder("[a-z]")
+            .config(GeneratorConfig { min_len: 1, max_len: 1, max_attempts: 1_000, timeout: None })
+            .rng(StdRng::seed_from_u64(seed))
+            .build()
+            .unwrap();
+        if let Ok(s) = g.generate_one() { seen.extend(s.chars()); }
+    }
+    assert!(seen.iter().all(|c| c.is_ascii_lowercase()), "[a-z] produced non-lowercase: {:?}", seen);
+    assert!(seen.len() > 3, "[a-z] only produced {:?}", seen);
+}
+
+#[test]
+fn test_class_range_uppercase_covers_alphabet() {
+    // [A-Z] must produce characters beyond just {A, Z}.
+    let mut seen = std::collections::HashSet::<char>::new();
+    for seed in 0u64..500 {
+        let mut g = RegexGenerator::builder("[A-Z]")
+            .config(GeneratorConfig { min_len: 1, max_len: 1, max_attempts: 1_000, timeout: None })
+            .rng(StdRng::seed_from_u64(seed))
+            .build()
+            .unwrap();
+        if let Ok(s) = g.generate_one() { seen.extend(s.chars()); }
+    }
+    assert!(seen.iter().all(|c| c.is_ascii_uppercase()), "[A-Z] produced non-uppercase: {:?}", seen);
+    assert!(seen.len() > 3, "[A-Z] only produced {:?}", seen);
+}
+
+#[test]
+fn test_class_range_digits_variety() {
+    // [0-9] must sample from all 10 digits, not just {'0', '9'}.
+    let mut seen = std::collections::HashSet::<char>::new();
+    for seed in 0u64..200 {
+        let mut g = RegexGenerator::builder("[0-9]")
+            .config(GeneratorConfig { min_len: 1, max_len: 1, max_attempts: 1_000, timeout: None })
+            .rng(StdRng::seed_from_u64(seed))
+            .build()
+            .unwrap();
+        if let Ok(s) = g.generate_one() { seen.extend(s.chars()); }
+    }
+    assert!(seen.iter().all(|c| c.is_ascii_digit()), "[0-9] produced non-digit: {:?}", seen);
+    assert!(seen.len() > 3, "[0-9] only produced {:?}", seen);
+}
+
+#[test]
+fn test_class_range_mixed_includes_midpoints() {
+    // [a-c0-2] must produce 'b' and '1' — the interior values not reachable
+    // if ranges are not expanded.
+    let mut seen = std::collections::HashSet::<char>::new();
+    for seed in 0u64..300 {
+        let mut g = RegexGenerator::builder("[a-c0-2]")
+            .config(GeneratorConfig { min_len: 1, max_len: 1, max_attempts: 1_000, timeout: None })
+            .rng(StdRng::seed_from_u64(seed))
+            .build()
+            .unwrap();
+        if let Ok(s) = g.generate_one() { seen.extend(s.chars()); }
+    }
+    let allowed: std::collections::HashSet<char> = "abc012".chars().collect();
+    assert!(seen.iter().all(|c| allowed.contains(c)), "[a-c0-2] produced unexpected chars: {:?}", seen);
+    assert!(seen.contains(&'b'), "[a-c0-2] never produced 'b'; saw: {:?}", seen);
+    assert!(seen.contains(&'1'), "[a-c0-2] never produced '1'; saw: {:?}", seen);
+}
+
+// ── Non-capturing group / group counter ──────────────────────────────────────
+
+#[test]
+fn test_non_capturing_group_backreference() {
+    // (?:a)(b)\1 — (?:a) must not consume group index 1; \1 must refer to (b).
+    let mut g = RegexGenerator::builder("(?:a)(b)\\1")
+        .allow_backrefs()
+        .config(GeneratorConfig { min_len: 3, max_len: 3, max_attempts: 1_000, timeout: None })
+        .rng(StdRng::seed_from_u64(1))
+        .build()
+        .unwrap();
+    assert_eq!(g.generate_one().unwrap(), "abb");
+}
+
+#[test]
+fn test_non_capturing_groups_before_capture() {
+    // (?:x)(?:y)(z)\1 — two non-capturing groups, then group 1 = (z).
+    let mut g = RegexGenerator::builder("(?:x)(?:y)(z)\\1")
+        .allow_backrefs()
+        .config(GeneratorConfig { min_len: 4, max_len: 4, max_attempts: 1_000, timeout: None })
+        .rng(StdRng::seed_from_u64(1))
+        .build()
+        .unwrap();
+    assert_eq!(g.generate_one().unwrap(), "xyzz");
+}
+
+#[test]
+fn test_interleaved_capturing_non_capturing_groups() {
+    // (a)(?:b)(c)\1\2 — group 1 = (a), group 2 = (c); result "abcac".
+    let mut g = RegexGenerator::builder("(a)(?:b)(c)\\1\\2")
+        .allow_backrefs()
+        .config(GeneratorConfig { min_len: 5, max_len: 5, max_attempts: 1_000, timeout: None })
+        .rng(StdRng::seed_from_u64(1))
+        .build()
+        .unwrap();
+    assert_eq!(g.generate_one().unwrap(), "abcac");
+}
+
+// ── Negated character classes ─────────────────────────────────────────────────
+
+#[test]
+fn test_bracket_negated_class() {
+    // [^abc] must not produce a, b, or c.
+    for seed in 0u64..50 {
+        let mut g = RegexGenerator::builder("[^abc]")
+            .config(GeneratorConfig { min_len: 1, max_len: 1, max_attempts: 1_000, timeout: None })
+            .rng(StdRng::seed_from_u64(seed))
+            .build()
+            .unwrap();
+        let s = g.generate_one().unwrap();
+        assert!(!s.chars().any(|c| "abc".contains(c)), "[^abc] produced excluded char; got {:?}", s);
+    }
+}
+
+#[test]
+fn test_backslash_d_upper_non_digit() {
+    // \D must not produce a digit.
+    for seed in 0u64..50 {
+        let mut g = RegexGenerator::builder("\\D")
+            .config(GeneratorConfig { min_len: 1, max_len: 1, max_attempts: 1_000, timeout: None })
+            .rng(StdRng::seed_from_u64(seed))
+            .build()
+            .unwrap();
+        let s = g.generate_one().unwrap();
+        assert!(!s.chars().any(|c| c.is_ascii_digit()), "\\D produced a digit; got {:?}", s);
+    }
+}
+
+#[test]
+fn test_backslash_w_upper_non_word_char() {
+    // \W must not produce a word character (letter, digit, or underscore).
+    for seed in 0u64..50 {
+        let mut g = RegexGenerator::builder("\\W")
+            .config(GeneratorConfig { min_len: 1, max_len: 1, max_attempts: 1_000, timeout: None })
+            .rng(StdRng::seed_from_u64(seed))
+            .build()
+            .unwrap();
+        let s = g.generate_one().unwrap();
+        assert!(!s.chars().any(|c| c.is_ascii_alphanumeric() || c == '_'), "\\W produced word char; got {:?}", s);
+    }
+}
+
+#[test]
+fn test_backslash_s_upper_non_whitespace() {
+    // \S must not produce whitespace.
+    for seed in 0u64..50 {
+        let mut g = RegexGenerator::builder("\\S")
+            .config(GeneratorConfig { min_len: 1, max_len: 1, max_attempts: 1_000, timeout: None })
+            .rng(StdRng::seed_from_u64(seed))
+            .build()
+            .unwrap();
+        let s = g.generate_one().unwrap();
+        assert!(!s.chars().any(|c| c.is_ascii_whitespace()), "\\S produced whitespace; got {:?}", s);
+    }
+}
+
+// ── Wildcard (`.`) ────────────────────────────────────────────────────────────
+
+#[test]
+fn test_wildcard_produces_non_alphanumeric() {
+    // `.` samples from all printable ASCII, so across many seeds it must
+    // produce at least one non-alphanumeric character.
+    let mut saw_non_alnum = false;
+    for seed in 0u64..500 {
+        let mut g = RegexGenerator::builder(".")
+            .config(GeneratorConfig { min_len: 1, max_len: 1, max_attempts: 1_000, timeout: None })
+            .rng(StdRng::seed_from_u64(seed))
+            .build()
+            .unwrap();
+        if let Ok(s) = g.generate_one() {
+            if s.chars().any(|c| !c.is_ascii_alphanumeric()) {
+                saw_non_alnum = true;
+                break;
+            }
+        }
+    }
+    assert!(saw_non_alnum, "`.` should produce non-alphanumeric chars across 500 seeds");
+}
+
+// ── allow_backrefs / .* fallback ─────────────────────────────────────────────
+
+#[test]
+fn test_allow_backrefs_simple_backref() {
+    // (a)\1 must produce "aa" via token-based generation.
+    let mut g = RegexGenerator::builder("(a)\\1")
+        .allow_backrefs()
+        .config(GeneratorConfig { min_len: 2, max_len: 2, max_attempts: 1_000, timeout: None })
+        .rng(StdRng::seed_from_u64(1))
+        .build()
+        .unwrap();
+    assert_eq!(g.generate_one().unwrap(), "aa");
+}
+
+#[test]
+fn test_allow_backrefs_negated_class_backref() {
+    // ([^abc])\1: captured char must not be in {a,b,c} and must be repeated.
+    let mut g = RegexGenerator::builder("([^abc])\\1")
+        .allow_backrefs()
+        .config(GeneratorConfig { min_len: 2, max_len: 2, max_attempts: 1_000, timeout: None })
+        .rng(StdRng::seed_from_u64(1))
+        .build()
+        .unwrap();
+    let s = g.generate_one().unwrap();
+    let mut chars = s.chars();
+    let first = chars.next().unwrap();
+    let second = chars.next().unwrap();
+    assert_eq!(first, second, "backreference must repeat the captured char; got {:?}", s);
+    assert!(!"abc".contains(first), "captured char must not be in [^abc]; got {:?}", s);
+}
+
+#[test]
+fn test_allow_backrefs_digit_class_backref() {
+    // ([0-9])\1: two identical digits.
+    let mut g = RegexGenerator::builder("([0-9])\\1")
+        .allow_backrefs()
+        .config(GeneratorConfig { min_len: 2, max_len: 2, max_attempts: 1_000, timeout: None })
+        .rng(StdRng::seed_from_u64(42))
+        .build()
+        .unwrap();
+    let s = g.generate_one().unwrap();
+    let mut chars = s.chars();
+    let first = chars.next().unwrap();
+    let second = chars.next().unwrap();
+    assert!(first.is_ascii_digit(), "first char must be a digit; got {:?}", first);
+    assert_eq!(first, second, "backreference must repeat the digit; got {:?}", s);
 }
 
 #[test]
