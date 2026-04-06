@@ -18,8 +18,21 @@ fn lex_pattern(pattern: &str, next_group: &mut usize) -> Vec<Token> {
                         break;
                     }
                     let c = chars.next().unwrap();
-                    // Check for range syntax `c-X` where X is not `]`.
-                    if chars.peek() == Some(&'-') {
+                    if c == '\\' {
+                        // Escape sequence inside character class — expand in place, no range.
+                        if let Some(esc) = chars.next() {
+                            match esc {
+                                'd' => class.extend('0'..='9'),
+                                'D' => class.extend((0x20u8..=0x7Eu8).map(|b| b as char).filter(|c| !c.is_ascii_digit())),
+                                'w' => class.extend("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_".chars()),
+                                'W' => class.extend((0x20u8..=0x7Eu8).map(|b| b as char).filter(|c| !c.is_ascii_alphanumeric() && *c != '_')),
+                                's' => class.extend(" \t\n\r\x0B\x0C".chars()),
+                                'S' => class.extend((0x20u8..=0x7Eu8).map(|b| b as char).filter(|c| !" \t\n\r\x0B\x0C".contains(*c))),
+                                _ => class.push(esc),
+                            }
+                        }
+                    } else if chars.peek() == Some(&'-') {
+                        // Check for range syntax `c-X` where X is not `]`.
                         let mut lookahead = chars.clone();
                         lookahead.next(); // skip '-'
                         match lookahead.peek() {
@@ -611,6 +624,34 @@ mod tests {
         }
         assert!(saw_above_1,  "\\w{{1,100}} must not always produce length 1");
         assert!(saw_above_64, "\\w{{1,100}} should sometimes produce strings longer than 64 chars");
+    }
+
+    #[test]
+    fn class_with_escape_sequences() {
+        // [a-f\d] should match hex digits (a-f plus 0-9), not literal backslash/d.
+        let mut g = RegexGenerator::builder("[a-f\\d]{8}")
+            .rng(StdRng::seed_from_u64(7))
+            .build()
+            .expect("compile");
+        for _ in 0..20 {
+            let s = g.generate_one().expect("generate");
+            assert_eq!(s.len(), 8);
+            assert!(s.chars().all(|c| ('a'..='f').contains(&c) || c.is_ascii_digit()), "bad char in: {}", s);
+        }
+    }
+
+    #[test]
+    fn class_escape_order_independent() {
+        // [\d a-f] and [a-f \d] should produce the same character set.
+        let mut g1 = RegexGenerator::builder("[\\da-f]{4}").rng(StdRng::seed_from_u64(99)).build().unwrap();
+        let mut g2 = RegexGenerator::builder("[a-f\\d]{4}").rng(StdRng::seed_from_u64(99)).build().unwrap();
+        for _ in 0..20 {
+            let s1 = g1.generate_one().unwrap();
+            let s2 = g2.generate_one().unwrap();
+            let valid = |c: char| ('a'..='f').contains(&c) || c.is_ascii_digit();
+            assert!(s1.chars().all(valid), "bad char in: {}", s1);
+            assert!(s2.chars().all(valid), "bad char in: {}", s2);
+        }
     }
 
     #[test]
