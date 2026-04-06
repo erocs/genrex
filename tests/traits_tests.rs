@@ -55,6 +55,69 @@ fn test_quantifier_trait() {
 }
 
 #[test]
+fn test_quantifier_question_mark_trait() {
+    // `a?` must produce "" or "a" and must cover both across seeds.
+    let mut saw_empty = false;
+    let mut saw_one = false;
+    for seed in 0u64..200 {
+        let mut g = RegexGenerator::builder("a?")
+            .config(GeneratorConfig { min_len: 0, max_len: 1, max_attempts: 100, timeout: None })
+            .rng(StdRng::seed_from_u64(seed))
+            .build()
+            .unwrap();
+        let s = g.generate_one().unwrap();
+        assert!(s == "" || s == "a", "a? must produce empty or 'a'; got {:?}", s);
+        if s.is_empty() { saw_empty = true; }
+        else { saw_one = true; }
+    }
+    assert!(saw_empty, "a? should sometimes produce empty string");
+    assert!(saw_one, "a? should sometimes produce 'a'");
+}
+
+#[test]
+fn test_quantifier_star_trait() {
+    // `a*` must produce only 'a' chars and lengths in [0, 32] (unbounded * is capped at 32).
+    // Greedy bias makes 0 statistically rare; use lazy `a*?` to verify empty is reachable.
+    let mut saw_nonempty = false;
+    let mut saw_empty = false;
+    for seed in 0u64..200 {
+        let mut g_greedy = RegexGenerator::builder("a*")
+            .config(GeneratorConfig { min_len: 0, max_len: 32, max_attempts: 100, timeout: None })
+            .rng(StdRng::seed_from_u64(seed))
+            .build()
+            .unwrap();
+        let s = g_greedy.generate_one().unwrap();
+        assert!(s.len() <= 32, "a* must produce at most 32 chars; got {}", s.len());
+        assert!(s.chars().all(|c| c == 'a'), "a* must only produce 'a' chars; got {:?}", s);
+        if !s.is_empty() { saw_nonempty = true; }
+
+        let mut g_lazy = RegexGenerator::builder("a*?")
+            .config(GeneratorConfig { min_len: 0, max_len: 32, max_attempts: 100, timeout: None })
+            .rng(StdRng::seed_from_u64(seed))
+            .build()
+            .unwrap();
+        if g_lazy.generate_one().unwrap().is_empty() { saw_empty = true; }
+    }
+    assert!(saw_nonempty, "a* should sometimes produce non-empty string");
+    assert!(saw_empty, "a*? (min=0, lazy) should sometimes produce empty string");
+}
+
+#[test]
+fn test_quantifier_plus_trait() {
+    // `a+` must always produce at least one 'a'.
+    for seed in 0u64..50 {
+        let mut g = RegexGenerator::builder("a+")
+            .config(GeneratorConfig { min_len: 1, max_len: 33, max_attempts: 100, timeout: None })
+            .rng(StdRng::seed_from_u64(seed))
+            .build()
+            .unwrap();
+        let s = g.generate_one().unwrap();
+        assert!(!s.is_empty(), "a+ must produce at least one char; got {:?}", s);
+        assert!(s.chars().all(|c| c == 'a'), "a+ must only produce 'a' chars; got {:?}", s);
+    }
+}
+
+#[test]
 fn test_group_trait() {
     let mut generator = DummyGenerator::new("(a)", GeneratorConfig { min_len: 1, max_len: 1, max_attempts: 100, timeout: None }, 7, false);
     let result = generator.generate_one();
@@ -335,6 +398,36 @@ fn test_bracket_negated_class() {
 }
 
 #[test]
+fn test_backslash_d_lower_digit() {
+    // \d must produce only ASCII digits.
+    for seed in 0u64..50 {
+        let mut g = RegexGenerator::builder("\\d")
+            .config(GeneratorConfig { min_len: 1, max_len: 1, max_attempts: 1_000, timeout: None })
+            .rng(StdRng::seed_from_u64(seed))
+            .build()
+            .unwrap();
+        let s = g.generate_one().unwrap();
+        assert!(s.chars().all(|c| c.is_ascii_digit()), "\\d must produce a digit; got {:?}", s);
+    }
+}
+
+#[test]
+fn test_backslash_s_lower_whitespace() {
+    // \s expands to Class(" \t\n\r\x0B\x0C") — must only produce those characters.
+    // Note: \x0B (vertical tab) is included but Rust's is_ascii_whitespace() excludes it.
+    const WHITESPACE: &str = " \t\n\r\x0B\x0C";
+    for seed in 0u64..50 {
+        let mut g = RegexGenerator::builder("\\s")
+            .config(GeneratorConfig { min_len: 1, max_len: 1, max_attempts: 1_000, timeout: None })
+            .rng(StdRng::seed_from_u64(seed))
+            .build()
+            .unwrap();
+        let s = g.generate_one().unwrap();
+        assert!(s.chars().all(|c| WHITESPACE.contains(c)), "\\s must produce whitespace; got {:?}", s);
+    }
+}
+
+#[test]
 fn test_backslash_d_upper_non_digit() {
     // \D must not produce a digit.
     for seed in 0u64..50 {
@@ -503,6 +596,74 @@ fn test_range_quantifier_with_space_around_comma() {
         "every length must be in [1,100]; got: {:?}", lengths);
     assert!(lengths.iter().any(|&l| l > 1),
         "\\w{{1, 100}} must not always produce 1 char; lengths: {:?}", lengths);
+}
+
+#[test]
+fn test_lazy_question_mark_trait() {
+    // `a??` (lazy ?) must produce "" or "a" and should favour "" more than greedy `a?`.
+    let mut lazy_empty_count = 0usize;
+    let mut greedy_empty_count = 0usize;
+    for seed in 0u64..200 {
+        let mut g_lazy = RegexGenerator::builder("a??")
+            .config(GeneratorConfig { min_len: 0, max_len: 1, max_attempts: 100, timeout: None })
+            .rng(StdRng::seed_from_u64(seed))
+            .build()
+            .unwrap();
+        let s = g_lazy.generate_one().unwrap();
+        assert!(s == "" || s == "a", "a?? must produce empty or 'a'; got {:?}", s);
+        if s.is_empty() { lazy_empty_count += 1; }
+
+        let mut g_greedy = RegexGenerator::builder("a?")
+            .config(GeneratorConfig { min_len: 0, max_len: 1, max_attempts: 100, timeout: None })
+            .rng(StdRng::seed_from_u64(seed))
+            .build()
+            .unwrap();
+        let s2 = g_greedy.generate_one().unwrap();
+        if s2.is_empty() { greedy_empty_count += 1; }
+    }
+    assert!(lazy_empty_count >= greedy_empty_count,
+        "lazy ?? should produce empty at least as often as greedy ?; lazy={} greedy={}", lazy_empty_count, greedy_empty_count);
+}
+
+#[test]
+fn test_lazy_star_trait() {
+    // `a*?` (lazy *) must produce valid results (len 0-32) and favour shorter than greedy `a*`.
+    let mut lazy_total = 0usize;
+    let mut greedy_total = 0usize;
+    for seed in 0u64..200 {
+        let mut g_lazy = RegexGenerator::builder("a*?")
+            .config(GeneratorConfig { min_len: 0, max_len: 32, max_attempts: 100, timeout: None })
+            .rng(StdRng::seed_from_u64(seed))
+            .build()
+            .unwrap();
+        let s = g_lazy.generate_one().unwrap();
+        assert!(s.chars().all(|c| c == 'a'), "a*? must only produce 'a' chars; got {:?}", s);
+        lazy_total += s.len();
+
+        let mut g_greedy = RegexGenerator::builder("a*")
+            .config(GeneratorConfig { min_len: 0, max_len: 32, max_attempts: 100, timeout: None })
+            .rng(StdRng::seed_from_u64(seed))
+            .build()
+            .unwrap();
+        greedy_total += g_greedy.generate_one().unwrap().len();
+    }
+    assert!(greedy_total >= lazy_total,
+        "greedy a* should average longer than lazy a*?; greedy_total={} lazy_total={}", greedy_total, lazy_total);
+}
+
+#[test]
+fn test_lazy_plus_trait() {
+    // `a+?` (lazy +) must always produce at least one 'a'.
+    for seed in 0u64..50 {
+        let mut g = RegexGenerator::builder("a+?")
+            .config(GeneratorConfig { min_len: 1, max_len: 33, max_attempts: 100, timeout: None })
+            .rng(StdRng::seed_from_u64(seed))
+            .build()
+            .unwrap();
+        let s = g.generate_one().unwrap();
+        assert!(!s.is_empty(), "a+? must produce at least one char; got {:?}", s);
+        assert!(s.chars().all(|c| c == 'a'), "a+? must only produce 'a' chars; got {:?}", s);
+    }
 }
 
 #[test]

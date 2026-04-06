@@ -61,6 +61,85 @@ fn test_quantifier_token() {
 }
 
 #[test]
+fn test_quantifier_question_mark() {
+    // `?` parses to Quantifier{min:0, max:1}; must produce both "" and "z" across seeds.
+    let tok = Token::Quantifier {
+        token: Box::new(Token::Literal('z')),
+        min: 0,
+        max: 1,
+        greedy: true,
+    };
+    let mut ctx = TokenContext::new();
+    let mut saw_empty = false;
+    let mut saw_one = false;
+    for seed in 0u64..200 {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let s = tok.generate(&mut rng, &mut ctx).unwrap();
+        assert!(s.len() <= 1, "? must produce 0 or 1 chars; got {:?}", s);
+        if s.is_empty() { saw_empty = true; }
+        if s == "z" { saw_one = true; }
+    }
+    assert!(saw_empty, "? should sometimes produce empty string");
+    assert!(saw_one, "? should sometimes produce one char");
+}
+
+#[test]
+fn test_quantifier_star_token() {
+    // `*` parses to Quantifier{min:0, max:usize::MAX}; generator caps effective_max at min+32=32.
+    // Greedy version: every result must be in [0, 32] and we must see non-empty results.
+    // (Greedy bias uses max(a,b) so 0 is statistically unlikely; empty is verified via lazy below.)
+    let tok_greedy = Token::Quantifier {
+        token: Box::new(Token::Literal('z')),
+        min: 0,
+        max: usize::MAX,
+        greedy: true,
+    };
+    // Lazy version: min=0, non-greedy uses min(a,b) which reliably produces 0.
+    let tok_lazy = Token::Quantifier {
+        token: Box::new(Token::Literal('z')),
+        min: 0,
+        max: usize::MAX,
+        greedy: false,
+    };
+    let mut ctx = TokenContext::new();
+    let mut saw_nonempty = false;
+    let mut saw_empty = false;
+    for seed in 0u64..200 {
+        let mut rng_g = StdRng::seed_from_u64(seed);
+        let s_g = tok_greedy.generate(&mut rng_g, &mut ctx).unwrap();
+        assert!(s_g.len() <= 32, "greedy * must produce at most 32 chars; got {}", s_g.len());
+        assert!(s_g.chars().all(|c| c == 'z'));
+        if !s_g.is_empty() { saw_nonempty = true; }
+
+        let mut rng_l = StdRng::seed_from_u64(seed);
+        let s_l = tok_lazy.generate(&mut rng_l, &mut ctx).unwrap();
+        assert!(s_l.len() <= 32, "lazy * must produce at most 32 chars; got {}", s_l.len());
+        if s_l.is_empty() { saw_empty = true; }
+    }
+    assert!(saw_nonempty, "greedy * should sometimes produce non-empty string");
+    assert!(saw_empty, "lazy * (min=0) should sometimes produce empty string");
+}
+
+#[test]
+fn test_quantifier_plus_token() {
+    // `+` parses to Quantifier{min:1, max:usize::MAX}; must always produce len >= 1.
+    let tok = Token::Quantifier {
+        token: Box::new(Token::Literal('z')),
+        min: 1,
+        max: usize::MAX,
+        greedy: true,
+    };
+    let mut ctx = TokenContext::new();
+    for seed in 0u64..200 {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let s = tok.generate(&mut rng, &mut ctx).unwrap();
+        assert!(s.len() >= 1, "+ must produce at least 1 char; got {:?}", s);
+        assert!(s.len() <= 33, "+ must produce at most 33 chars (capped); got {}", s.len());
+        assert!(s.chars().all(|c| c == 'z'));
+    }
+}
+
+#[test]
 fn test_group_token() {
     let tok = Token::Group(Box::new(Token::Literal('g')), 1);
     let mut rng = StdRng::seed_from_u64(6);
